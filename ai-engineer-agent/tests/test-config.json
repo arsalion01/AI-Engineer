@@ -1,0 +1,70 @@
+{
+  "test_config": {
+    "environment": "production",
+    "timeout": 30,
+    "retry_attempts": 3,
+    "parallel_tests": false
+  },
+  "endpoints": {
+    "app_url": "https://ai-engineer-agent.com",
+    "api_url": "https://ai-engineer-agent.com/api/v1",
+    "monitoring_url": "https://monitoring.ai-engineer-agent.com",
+    "websocket_url": "wss://ai-engineer-agent.com/ws"
+  },
+  "database": {
+    "postgres": {
+      "host": "postgresql",
+      "port": 5432,
+      "database": "ai_engineer_db",
+      "max_connections": 100
+    },
+    "timescale": {
+      "host": "timescaledb",
+      "port": 5432,
+      "database": "ai_engineer_analytics"
+    }
+  },
+  "cache": {
+    "redis": {
+      "host": "redis",
+      "port": 6379,
+      "timeout": 5
+    }
+  },
+  "performance": {
+    "load_test": {
+      "duration": "5m",
+      "virtual_users": 10,
+      "ramp_up": "2m"
+    },
+    "thresholds": {
+      "response_time_95th": 2000,
+      "response_time_avg": 800,
+      "error_rate": 5
+    }
+  },
+  "security": {
+    "ssl_check": true,
+    "security_headers": true,
+    "vulnerability_scan": false,
+    "penetration_test": false
+  },
+  "monitoring": {
+    "prometheus": {
+      "url": "http://prometheus:9090"
+    },
+    "grafana": {
+      "url": "http://grafana:3000"
+    }
+  },
+  "backup": {
+    "test_restore": false,
+    "verify_backups": true,
+    "retention_check": true
+  },
+  "alerts": {
+    "test_notifications": false,
+    "check_alert_rules": true,
+    "validate_thresholds": true
+  }
+}

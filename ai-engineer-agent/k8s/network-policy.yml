@@ -1,0 +1,550 @@
+# AI Engineer Agent - Network Security Policies
+# Network segmentation and traffic control for enhanced security
+
+# Default deny-all policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  labels:
+    app: ai-engineer-agent
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+# Application tier network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-engineer-app-policy
+  labels:
+    app: ai-engineer-agent
+    component: app
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: app
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow health checks from monitoring
+  - from:
+    - podSelector:
+        matchLabels:
+          component: monitoring
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow inter-pod communication for load balancing
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: app
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  # Allow connection to databases
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: analytics
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow connection to Redis
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: cache
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow external API calls (Google APIs, etc.)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Database tier network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-policy
+  labels:
+    app: ai-engineer-agent
+    component: database
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: database
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from application pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: app
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow connections from monitoring
+  - from:
+    - podSelector:
+        matchLabels:
+          component: monitoring
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow backup jobs
+  - from:
+    - podSelector:
+        matchLabels:
+          job: backup
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# TimescaleDB network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: timescaledb-policy
+  labels:
+    app: ai-engineer-agent
+    component: analytics
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: analytics
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from application pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: app
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow connections from monitoring and analytics
+  - from:
+    - podSelector:
+        matchLabels:
+          component: monitoring
+    ports:
+    - protocol: TCP
+      port: 5432
+  - from:
+    - podSelector:
+        matchLabels:
+          component: visualization
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow backup jobs
+  - from:
+    - podSelector:
+        matchLabels:
+          job: backup
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Redis network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-policy
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: cache
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections from application pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: app
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow connections from monitoring
+  - from:
+    - podSelector:
+        matchLabels:
+          component: monitoring
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow sentinel communication
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: sentinel
+    ports:
+    - protocol: TCP
+      port: 6379
+  egress:
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Redis Sentinel network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-sentinel-policy
+  labels:
+    app: ai-engineer-agent
+    component: sentinel
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: sentinel
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow inter-sentinel communication
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: sentinel
+    ports:
+    - protocol: TCP
+      port: 26379
+  # Allow connections from application pods for sentinel discovery
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: app
+    ports:
+    - protocol: TCP
+      port: 26379
+  egress:
+  # Allow communication with Redis master
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: cache
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow inter-sentinel communication
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: sentinel
+    ports:
+    - protocol: TCP
+      port: 26379
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Monitoring network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-policy
+  labels:
+    app: ai-engineer-agent
+    component: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: monitoring
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow access from ingress for web interface
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Allow scraping from other monitoring components
+  - from:
+    - podSelector:
+        matchLabels:
+          component: visualization
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow scraping all application components
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+    ports:
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  # Allow external alertmanager communication
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 9093
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Grafana network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-policy
+  labels:
+    app: ai-engineer-agent
+    component: visualization
+spec:
+  podSelector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: visualization
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow access from ingress for web interface
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  # Allow connections to data sources
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: analytics
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow external plugin downloads
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# Allow backup jobs to access databases
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backup-job-policy
+  labels:
+    app: ai-engineer-agent
+    job: backup
+spec:
+  podSelector:
+    matchLabels:
+      job: backup
+  policyTypes:
+  - Egress
+  egress:
+  # Allow connections to databases for backup
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ai-engineer-agent
+          component: analytics
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow external storage for backup uploads
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

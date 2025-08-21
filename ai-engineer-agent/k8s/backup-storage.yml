@@ -1,0 +1,437 @@
+# AI Engineer Agent - Backup and Storage Configuration
+# Automated backup jobs and storage management
+
+# Storage Class definitions
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+  labels:
+    app: ai-engineer-agent
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp3
+  fsType: ext4
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: backup-storage
+  labels:
+    app: ai-engineer-agent
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: sc1
+  fsType: ext4
+  encrypted: "true"
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+
+---
+# Database Backup Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-scripts
+  labels:
+    app: ai-engineer-agent
+    component: backup
+data:
+  postgres-backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    # Configuration
+    BACKUP_DIR="/backup"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    POSTGRES_HOST="${POSTGRES_HOST:-postgresql}"
+    POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+    RETENTION_DAYS="${RETENTION_DAYS:-30}"
+    
+    # Create backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Perform backup
+    echo "Starting PostgreSQL backup at $(date)"
+    pg_dump -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --verbose --no-owner --no-acl --compress=9 \
+      > "$BACKUP_DIR/postgres_${POSTGRES_DB}_${TIMESTAMP}.sql.gz"
+    
+    # Verify backup
+    if [ -f "$BACKUP_DIR/postgres_${POSTGRES_DB}_${TIMESTAMP}.sql.gz" ]; then
+      echo "Backup created successfully: postgres_${POSTGRES_DB}_${TIMESTAMP}.sql.gz"
+      
+      # Upload to cloud storage if configured
+      if [ -n "${AWS_S3_BUCKET:-}" ]; then
+        aws s3 cp "$BACKUP_DIR/postgres_${POSTGRES_DB}_${TIMESTAMP}.sql.gz" \
+          "s3://$AWS_S3_BUCKET/database-backups/postgres/"
+        echo "Backup uploaded to S3"
+      fi
+    else
+      echo "Backup failed!" >&2
+      exit 1
+    fi
+    
+    # Cleanup old backups
+    find "$BACKUP_DIR" -name "postgres_${POSTGRES_DB}_*.sql.gz" -mtime +$RETENTION_DAYS -delete
+    echo "Cleanup completed"
+
+  timescale-backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    # Configuration
+    BACKUP_DIR="/backup"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    TIMESCALE_HOST="${TIMESCALE_HOST:-timescaledb}"
+    TIMESCALE_PORT="${TIMESCALE_PORT:-5432}"
+    RETENTION_DAYS="${RETENTION_DAYS:-30}"
+    
+    # Create backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Perform backup
+    echo "Starting TimescaleDB backup at $(date)"
+    pg_dump -h "$TIMESCALE_HOST" -p "$TIMESCALE_PORT" -U "$TIMESCALE_USER" -d "$TIMESCALE_DB" \
+      --verbose --no-owner --no-acl --compress=9 \
+      > "$BACKUP_DIR/timescale_${TIMESCALE_DB}_${TIMESTAMP}.sql.gz"
+    
+    # Verify backup
+    if [ -f "$BACKUP_DIR/timescale_${TIMESCALE_DB}_${TIMESTAMP}.sql.gz" ]; then
+      echo "Backup created successfully: timescale_${TIMESCALE_DB}_${TIMESTAMP}.sql.gz"
+      
+      # Upload to cloud storage if configured
+      if [ -n "${AWS_S3_BUCKET:-}" ]; then
+        aws s3 cp "$BACKUP_DIR/timescale_${TIMESCALE_DB}_${TIMESTAMP}.sql.gz" \
+          "s3://$AWS_S3_BUCKET/database-backups/timescale/"
+        echo "Backup uploaded to S3"
+      fi
+    else
+      echo "Backup failed!" >&2
+      exit 1
+    fi
+    
+    # Cleanup old backups
+    find "$BACKUP_DIR" -name "timescale_${TIMESCALE_DB}_*.sql.gz" -mtime +$RETENTION_DAYS -delete
+    echo "Cleanup completed"
+
+  redis-backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    # Configuration
+    BACKUP_DIR="/backup"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    REDIS_HOST="${REDIS_HOST:-redis}"
+    REDIS_PORT="${REDIS_PORT:-6379}"
+    RETENTION_DAYS="${RETENTION_DAYS:-7}"
+    
+    # Create backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Perform backup
+    echo "Starting Redis backup at $(date)"
+    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" --rdb "$BACKUP_DIR/redis_${TIMESTAMP}.rdb"
+    
+    # Compress backup
+    gzip "$BACKUP_DIR/redis_${TIMESTAMP}.rdb"
+    
+    # Verify backup
+    if [ -f "$BACKUP_DIR/redis_${TIMESTAMP}.rdb.gz" ]; then
+      echo "Backup created successfully: redis_${TIMESTAMP}.rdb.gz"
+      
+      # Upload to cloud storage if configured
+      if [ -n "${AWS_S3_BUCKET:-}" ]; then
+        aws s3 cp "$BACKUP_DIR/redis_${TIMESTAMP}.rdb.gz" \
+          "s3://$AWS_S3_BUCKET/redis-backups/"
+        echo "Backup uploaded to S3"
+      fi
+    else
+      echo "Backup failed!" >&2
+      exit 1
+    fi
+    
+    # Cleanup old backups
+    find "$BACKUP_DIR" -name "redis_*.rdb.gz" -mtime +$RETENTION_DAYS -delete
+    echo "Cleanup completed"
+
+---
+# Backup Persistent Volume
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: backup-pv
+  labels:
+    app: ai-engineer-agent
+    component: backup
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: backup-storage
+  hostPath:
+    path: /backup
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-pvc
+  labels:
+    app: ai-engineer-agent
+    component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: backup-storage
+
+---
+# PostgreSQL Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup-job
+  labels:
+    app: ai-engineer-agent
+    component: backup
+    job: backup
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: ai-engineer-agent
+        job: backup
+    spec:
+      template:
+        metadata:
+          labels:
+            app: ai-engineer-agent
+            job: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15-alpine
+            command:
+            - /bin/sh
+            - /scripts/postgres-backup.sh
+            env:
+            - name: POSTGRES_HOST
+              value: "postgresql"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-db
+            - name: AWS_S3_BUCKET
+              value: "ai-engineer-backups"
+            - name: RETENTION_DAYS
+              value: "30"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+            - name: backup-scripts
+              mountPath: /scripts
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          - name: backup-scripts
+            configMap:
+              name: backup-scripts
+              defaultMode: 0755
+
+---
+# TimescaleDB Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: timescale-backup-job
+  labels:
+    app: ai-engineer-agent
+    component: backup
+    job: backup
+spec:
+  schedule: "30 2 * * *"  # Daily at 2:30 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: ai-engineer-agent
+        job: backup
+    spec:
+      template:
+        metadata:
+          labels:
+            app: ai-engineer-agent
+            job: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: timescale-backup
+            image: postgres:15-alpine
+            command:
+            - /bin/sh
+            - /scripts/timescale-backup.sh
+            env:
+            - name: TIMESCALE_HOST
+              value: "timescaledb"
+            - name: TIMESCALE_PORT
+              value: "5432"
+            - name: TIMESCALE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: timescale-user
+            - name: TIMESCALE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: timescale-password
+            - name: TIMESCALE_DB
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: timescale-db
+            - name: AWS_S3_BUCKET
+              value: "ai-engineer-backups"
+            - name: RETENTION_DAYS
+              value: "30"
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "200m"
+              limits:
+                memory: "1Gi"
+                cpu: "1000m"
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+            - name: backup-scripts
+              mountPath: /scripts
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          - name: backup-scripts
+            configMap:
+              name: backup-scripts
+              defaultMode: 0755
+
+---
+# Redis Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup-job
+  labels:
+    app: ai-engineer-agent
+    component: backup
+    job: backup
+spec:
+  schedule: "0 3 * * *"  # Daily at 3 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app: ai-engineer-agent
+        job: backup
+    spec:
+      template:
+        metadata:
+          labels:
+            app: ai-engineer-agent
+            job: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: redis-backup
+            image: redis:7-alpine
+            command:
+            - /bin/sh
+            - /scripts/redis-backup.sh
+            env:
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: AWS_S3_BUCKET
+              value: "ai-engineer-backups"
+            - name: RETENTION_DAYS
+              value: "7"
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "50m"
+              limits:
+                memory: "256Mi"
+                cpu: "250m"
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+            - name: backup-scripts
+              mountPath: /scripts
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          - name: backup-scripts
+            configMap:
+              name: backup-scripts
+              defaultMode: 0755
+
+---
+# Backup Monitoring ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: backup-monitoring
+  labels:
+    app: ai-engineer-agent
+    component: backup
+spec:
+  selector:
+    matchLabels:
+      job: backup
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 60s
