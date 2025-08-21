@@ -1,0 +1,292 @@
+# AI Engineer Agent - Autoscaling Configuration
+# Horizontal Pod Autoscaler and Vertical Pod Autoscaler configurations
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-engineer-app-hpa
+  labels:
+    app: ai-engineer-agent
+    component: app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-engineer-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "100"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 4
+        periodSeconds: 30
+      selectPolicy: Max
+
+---
+# Redis Autoscaling (if needed for high load scenarios)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: redis-hpa
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: redis
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 120
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Max
+
+---
+# Vertical Pod Autoscaler for fine-tuning resource requests
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ai-engineer-app-vpa
+  labels:
+    app: ai-engineer-agent
+    component: app
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-engineer-app
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: ai-engineer-app
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2000m
+        memory: 4Gi
+      controlledResources: ["cpu", "memory"]
+      controlledValues: RequestsAndLimits
+
+---
+# Database VPA for PostgreSQL
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: postgresql-vpa
+  labels:
+    app: ai-engineer-agent
+    component: database
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: postgresql
+  updatePolicy:
+    updateMode: "Off"  # Manual updates for databases
+  resourcePolicy:
+    containerPolicies:
+    - containerName: postgresql
+      minAllowed:
+        cpu: 250m
+        memory: 512Mi
+      maxAllowed:
+        cpu: 2000m
+        memory: 8Gi
+      controlledResources: ["cpu", "memory"]
+
+---
+# TimescaleDB VPA
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: timescaledb-vpa
+  labels:
+    app: ai-engineer-agent
+    component: analytics
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: timescaledb
+  updatePolicy:
+    updateMode: "Off"  # Manual updates for databases
+  resourcePolicy:
+    containerPolicies:
+    - containerName: timescaledb
+      minAllowed:
+        cpu: 500m
+        memory: 1Gi
+      maxAllowed:
+        cpu: 4000m
+        memory: 16Gi
+      controlledResources: ["cpu", "memory"]
+
+---
+# Custom Metrics for Application-specific Autoscaling
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: ai-engineer-metrics
+  labels:
+    app: ai-engineer-agent
+    component: metrics
+spec:
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: app
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+# PodDisruptionBudget to ensure availability during scaling
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-engineer-app-pdb
+  labels:
+    app: ai-engineer-agent
+    component: app
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: app
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-pdb
+  labels:
+    app: ai-engineer-agent
+    component: database
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: database
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: timescaledb-pdb
+  labels:
+    app: ai-engineer-agent
+    component: analytics
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: analytics
+
+---
+# Resource Quotas for the namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ai-engineer-quota
+  labels:
+    app: ai-engineer-agent
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    persistentvolumeclaims: "10"
+    pods: "50"
+    services: "20"
+    secrets: "20"
+    configmaps: "20"
+
+---
+# LimitRange to set default resource constraints
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ai-engineer-limits
+  labels:
+    app: ai-engineer-agent
+spec:
+  limits:
+  - default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    type: Container
+  - max:
+      storage: "100Gi"
+    type: PersistentVolumeClaim

@@ -1,0 +1,280 @@
+# AI Engineer Agent - Redis Configuration
+# In-memory caching and session storage
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis-pv
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  hostPath:
+    path: /data/redis
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  labels:
+    app: ai-engineer-agent
+    component: cache
+data:
+  redis.conf: |
+    # Redis Configuration for AI Engineer Agent
+    
+    # Basic Settings
+    bind 0.0.0.0
+    port 6379
+    tcp-backlog 511
+    
+    # Memory Management
+    maxmemory 1gb
+    maxmemory-policy allkeys-lru
+    
+    # Persistence
+    save 900 1
+    save 300 10
+    save 60 10000
+    
+    # Security
+    requirepass changeme-in-production
+    
+    # Performance
+    tcp-keepalive 300
+    timeout 0
+    
+    # Logging
+    loglevel notice
+    syslog-enabled yes
+    syslog-ident redis
+    
+    # Client Management
+    maxclients 10000
+    
+    # Advanced Features
+    notify-keyspace-events Ex
+    
+    # RDB Settings
+    rdbcompression yes
+    rdbchecksum yes
+    
+    # AOF Settings
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    
+    # Slow Log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: cache
+  template:
+    metadata:
+      labels:
+        app: ai-engineer-agent
+        component: cache
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - /etc/redis/redis.conf
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /etc/redis
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        env:
+        - name: REDIS_PASSWORD
+          value: "changeme-in-production"
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: redis-pvc
+      - name: redis-config
+        configMap:
+          name: redis-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: ai-engineer-agent
+    component: cache
+spec:
+  selector:
+    app: ai-engineer-agent
+    component: cache
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# Redis Sentinel for High Availability (Optional)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-sentinel
+  labels:
+    app: ai-engineer-agent
+    component: sentinel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-engineer-agent
+      component: sentinel
+  template:
+    metadata:
+      labels:
+        app: ai-engineer-agent
+        component: sentinel
+    spec:
+      containers:
+      - name: redis-sentinel
+        image: redis:7-alpine
+        ports:
+        - containerPort: 26379
+        command:
+        - redis-sentinel
+        - /etc/redis/sentinel.conf
+        - --sentinel
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: sentinel-config
+          mountPath: /etc/redis
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -p
+            - "26379"
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -p
+            - "26379"
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: sentinel-config
+        configMap:
+          name: redis-sentinel-config
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-sentinel-config
+  labels:
+    app: ai-engineer-agent
+    component: sentinel
+data:
+  sentinel.conf: |
+    # Redis Sentinel Configuration
+    bind 0.0.0.0
+    port 26379
+    
+    # Monitor the master Redis instance
+    sentinel monitor mymaster redis 6379 2
+    sentinel auth-pass mymaster changeme-in-production
+    
+    # Failure detection
+    sentinel down-after-milliseconds mymaster 30000
+    sentinel parallel-syncs mymaster 1
+    sentinel failover-timeout mymaster 180000
+    
+    # Notification
+    sentinel deny-scripts-reconfig yes
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  labels:
+    app: ai-engineer-agent
+    component: sentinel
+spec:
+  selector:
+    app: ai-engineer-agent
+    component: sentinel
+  ports:
+  - port: 26379
+    targetPort: 26379
+  type: ClusterIP

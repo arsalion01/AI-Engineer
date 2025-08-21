@@ -1,0 +1,619 @@
+# AI Engineer Agent - Production Deployment Pipeline
+# Comprehensive CI/CD workflow for automated testing and deployment
+
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: 'Skip test execution'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  
+jobs:
+  # ============================================================================
+  # Code Quality and Security Checks
+  # ============================================================================
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    outputs:
+      security-passed: ${{ steps.security-check.outputs.passed }}
+      quality-passed: ${{ steps.quality-check.outputs.passed }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: |
+          npm ci
+          npm install -g @typescript-eslint/eslint-plugin @typescript-eslint/parser
+          
+      - name: TypeScript Type Checking
+        run: |
+          npm run type-check
+          echo "✅ TypeScript type checking passed"
+          
+      - name: ESLint Code Quality
+        id: quality-check
+        run: |
+          npm run lint
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "✅ ESLint code quality check passed"
+          
+      - name: Security Vulnerability Scan
+        id: security-check
+        run: |
+          npm audit --audit-level=moderate
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "✅ Security vulnerability scan passed"
+          
+      - name: SAST Security Analysis
+        uses: github/super-linter@v4
+        env:
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_TYPESCRIPT: true
+          VALIDATE_DOCKERFILE: true
+          VALIDATE_YAML: true
+          VALIDATE_JSON: true
+          
+      - name: Dependency License Check
+        run: |
+          npx license-checker --onlyAllow 'MIT;Apache-2.0;BSD;BSD-2-Clause;BSD-3-Clause;ISC;Unlicense'
+          echo "✅ License compliance check passed"
+
+  # ============================================================================
+  # Unit and Integration Tests
+  # ============================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    if: ${{ !inputs.skip_tests }}
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: ai_engineer_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: Install Dependencies
+        run: npm ci
+        
+      - name: Setup Test Environment
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/ai_engineer_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_jwt_secret_for_github_actions
+          ENCRYPTION_KEY: test_encryption_key_32_chars_long
+        run: |
+          cp .env.local.template .env.test
+          echo "Setting up test database..."
+          npm run db:migrate:test
+          
+      - name: Run Unit Tests
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/ai_engineer_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_jwt_secret_for_github_actions
+          ENCRYPTION_KEY: test_encryption_key_32_chars_long
+        run: |
+          npm run test:unit
+          echo "✅ Unit tests passed"
+          
+      - name: Run Integration Tests
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/ai_engineer_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_jwt_secret_for_github_actions
+          ENCRYPTION_KEY: test_encryption_key_32_chars_long
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY_TEST }}
+        run: |
+          npm run test:integration
+          echo "✅ Integration tests passed"
+          
+      - name: Generate Test Coverage
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/ai_engineer_test
+          REDIS_URL: redis://localhost:6379
+        run: |
+          npm run test:coverage
+          echo "✅ Test coverage generated"
+          
+      - name: Upload Coverage Reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage/lcov.info
+          flags: unittests
+          name: ai-engineer-agent-coverage
+
+  # ============================================================================
+  # Build and Push Docker Image
+  # ============================================================================
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [code-quality, test]
+    if: always() && (needs.code-quality.result == 'success' && (needs.test.result == 'success' || inputs.skip_tests))
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and Push Docker Image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tags }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          
+      - name: Scan Image for Vulnerabilities
+        uses: anchore/scan-action@v3
+        with:
+          image: ${{ steps.meta.outputs.tags }}
+          fail-build: true
+          severity-cutoff: high
+          
+      - name: Upload Scan Results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: results.sarif
+
+  # ============================================================================
+  # Deploy to Staging
+  # ============================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.ai-engineer-agent.com
+      
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Setup SSH Key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+          
+      - name: Deploy to Staging Server
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${STAGING_USER}@${STAGING_HOST} << 'EOF'
+            set -e
+            echo "🚀 Starting staging deployment..."
+            
+            # Navigate to application directory
+            cd /opt/ai-engineer-agent
+            
+            # Pull latest configuration
+            git pull origin main
+            
+            # Update environment variables
+            cp .env.staging .env.production
+            
+            # Pull new Docker image
+            docker pull ${{ needs.build.outputs.image-tag }}
+            
+            # Run database migrations
+            docker-compose -f docker-compose.prod.yml run --rm ai-engineer-app npm run db:migrate
+            
+            # Deploy with zero downtime
+            docker-compose -f docker-compose.prod.yml up -d
+            
+            # Health check
+            timeout 300 bash -c 'until curl -f http://localhost:3000/health; do sleep 5; done'
+            
+            echo "✅ Staging deployment completed successfully"
+          EOF
+          
+      - name: Run Smoke Tests
+        env:
+          STAGING_URL: https://staging.ai-engineer-agent.com
+        run: |
+          # Wait for service to be ready
+          sleep 30
+          
+          # Basic health check
+          curl -f "${STAGING_URL}/health"
+          
+          # API endpoint test
+          curl -f "${STAGING_URL}/api/status"
+          
+          echo "✅ Staging smoke tests passed"
+          
+      - name: Notify Deployment Success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          text: '🚀 AI Engineer Agent deployed to staging successfully!'
+          
+      - name: Notify Deployment Failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          text: '❌ AI Engineer Agent staging deployment failed!'
+
+  # ============================================================================
+  # Security and Performance Testing
+  # ============================================================================
+  security-testing:
+    name: Security & Performance Testing
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: OWASP ZAP Security Scan
+        uses: zaproxy/action-full-scan@v0.7.0
+        with:
+          target: 'https://staging.ai-engineer-agent.com'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+          
+      - name: Performance Testing with Artillery
+        run: |
+          npm install -g artillery@latest
+          artillery quick --count 50 --num 10 https://staging.ai-engineer-agent.com
+          echo "✅ Performance testing completed"
+          
+      - name: Load Testing
+        env:
+          STAGING_URL: https://staging.ai-engineer-agent.com
+        run: |
+          # Install k6
+          sudo apt update
+          sudo apt install -y k6
+          
+          # Run load test
+          cat > loadtest.js << 'EOF'
+          import http from 'k6/http';
+          import { check } from 'k6';
+          
+          export let options = {
+            stages: [
+              { duration: '2m', target: 10 },
+              { duration: '5m', target: 50 },
+              { duration: '2m', target: 0 },
+            ],
+          };
+          
+          export default function() {
+            let response = http.get(`${__ENV.STAGING_URL}/health`);
+            check(response, {
+              'status is 200': (r) => r.status === 200,
+              'response time < 500ms': (r) => r.timings.duration < 500,
+            });
+          }
+          EOF
+          
+          k6 run loadtest.js
+          echo "✅ Load testing completed"
+
+  # ============================================================================
+  # Production Deployment
+  # ============================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, deploy-staging, security-testing]
+    if: github.ref == 'refs/heads/main' && inputs.environment == 'production'
+    environment:
+      name: production
+      url: https://ai-engineer-agent.com
+      
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Manual Approval Required
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: ${{ secrets.PRODUCTION_APPROVERS }}
+          issue-title: "Production Deployment Approval"
+          issue-body: |
+            Please approve the production deployment of AI Engineer Agent.
+            
+            **Changes:** ${{ github.event.head_commit.message }}
+            **Commit:** ${{ github.sha }}
+            **Docker Image:** ${{ needs.build.outputs.image-tag }}
+            
+            **Pre-deployment Checklist:**
+            - [ ] Staging tests passed
+            - [ ] Security scan completed
+            - [ ] Performance tests acceptable
+            - [ ] Database migration plan reviewed
+            - [ ] Rollback plan confirmed
+            
+      - name: Setup SSH Key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          
+      - name: Create Deployment Backup
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${PRODUCTION_USER}@${PRODUCTION_HOST} << 'EOF'
+            # Create backup before deployment
+            /opt/ai-engineer-agent/deploy.sh backup
+            echo "✅ Production backup created"
+          EOF
+          
+      - name: Deploy to Production
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${PRODUCTION_USER}@${PRODUCTION_HOST} << 'EOF'
+            set -e
+            echo "🚀 Starting production deployment..."
+            
+            cd /opt/ai-engineer-agent
+            
+            # Update configuration
+            git pull origin main
+            
+            # Set production environment
+            cp .env.production .env
+            
+            # Run deployment script
+            ./deploy.sh deploy --image="${{ needs.build.outputs.image-tag }}"
+            
+            echo "✅ Production deployment completed"
+          EOF
+          
+      - name: Production Health Check
+        env:
+          PRODUCTION_URL: https://ai-engineer-agent.com
+        run: |
+          # Extended health check for production
+          timeout 600 bash -c 'until curl -f ${PRODUCTION_URL}/health; do sleep 10; done'
+          
+          # Verify API endpoints
+          curl -f "${PRODUCTION_URL}/api/status"
+          
+          # Check SSL certificate
+          echo | openssl s_client -connect ai-engineer-agent.com:443 2>/dev/null | openssl x509 -noout -dates
+          
+          echo "✅ Production health checks passed"
+          
+      - name: Update Monitoring Dashboards
+        env:
+          GRAFANA_API_KEY: ${{ secrets.GRAFANA_API_KEY }}
+          GRAFANA_URL: https://monitoring.ai-engineer-agent.com
+        run: |
+          # Refresh Grafana dashboards
+          curl -X POST \
+            -H "Authorization: Bearer ${GRAFANA_API_KEY}" \
+            -H "Content-Type: application/json" \
+            "${GRAFANA_URL}/api/admin/provisioning/dashboards/reload"
+          
+          echo "✅ Monitoring dashboards updated"
+          
+      - name: Notify Production Deployment
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#production'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          text: |
+            🎉 AI Engineer Agent successfully deployed to production!
+            
+            **Deployment Details:**
+            - Commit: ${{ github.sha }}
+            - Image: ${{ needs.build.outputs.image-tag }}
+            - URL: https://ai-engineer-agent.com
+            
+            **Next Steps:**
+            - Monitor application metrics
+            - Verify user functionality
+            - Check error rates and performance
+          
+      - name: Rollback on Failure
+        if: failure()
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${PRODUCTION_USER}@${PRODUCTION_HOST} << 'EOF'
+            echo "🔄 Rolling back production deployment..."
+            /opt/ai-engineer-agent/deploy.sh rollback
+            echo "✅ Production rollback completed"
+          EOF
+          
+      - name: Notify Production Failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#production'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          text: |
+            🚨 AI Engineer Agent production deployment FAILED!
+            
+            **Rollback Status:** Automatic rollback initiated
+            **Commit:** ${{ github.sha }}
+            **Action Required:** Investigation needed
+            
+            Please check the deployment logs and system status.
+
+  # ============================================================================
+  # Post-Deployment Monitoring
+  # ============================================================================
+  post-deployment:
+    name: Post-Deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: success()
+    
+    steps:
+      - name: Wait for System Stabilization
+        run: sleep 300  # Wait 5 minutes
+        
+      - name: Extended Health Monitoring
+        env:
+          PRODUCTION_URL: https://ai-engineer-agent.com
+        run: |
+          # Monitor for 10 minutes
+          for i in {1..20}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" ${PRODUCTION_URL}/health)
+            if [ "$response" != "200" ]; then
+              echo "❌ Health check failed with status: $response"
+              exit 1
+            fi
+            echo "✅ Health check $i/20 passed"
+            sleep 30
+          done
+          
+          echo "✅ Extended health monitoring completed successfully"
+          
+      - name: Performance Baseline Check
+        env:
+          PRODUCTION_URL: https://ai-engineer-agent.com
+        run: |
+          # Check response times
+          avg_response=$(curl -s -w "%{time_total}" -o /dev/null ${PRODUCTION_URL})
+          
+          if (( $(echo "$avg_response > 2.0" | bc -l) )); then
+            echo "⚠️  High response time detected: ${avg_response}s"
+            # Notify but don't fail - might be temporary
+          else
+            echo "✅ Response time acceptable: ${avg_response}s"
+          fi
+          
+      - name: Final Success Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#production'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          text: |
+            ✅ AI Engineer Agent production deployment completed successfully!
+            
+            **System Status:** All health checks passing
+            **Monitoring:** Active and stable
+            **URL:** https://ai-engineer-agent.com
+            
+            Deployment pipeline completed successfully. 🎉

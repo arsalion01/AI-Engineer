@@ -1,0 +1,182 @@
+# AI Engineer Agent - ConfigMap and Secret Configurations
+# Application configuration and sensitive data management
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-engineer-config
+  labels:
+    app: ai-engineer-agent
+data:
+  # Application Configuration
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  
+  # API Configuration
+  API_VERSION: "v1"
+  API_PREFIX: "/api"
+  
+  # Rate Limiting
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  
+  # Session Configuration
+  SESSION_TIMEOUT: "3600000"
+  
+  # Workflow Configuration
+  WORKFLOW_TIMEOUT: "300000"
+  MAX_WORKFLOW_STEPS: "100"
+  
+  # File Upload Configuration
+  MAX_FILE_SIZE: "10485760"
+  ALLOWED_EXTENSIONS: "json,yaml,yml,txt,md"
+  
+  # Team Configuration
+  MAX_TEAM_SIZE: "50"
+  MAX_TEAMS_PER_USER: "5"
+  
+  # Analytics Configuration
+  ANALYTICS_BATCH_SIZE: "100"
+  ANALYTICS_FLUSH_INTERVAL: "30000"
+  
+  # Backup Configuration
+  BACKUP_RETENTION_DAYS: "30"
+  BACKUP_SCHEDULE: "0 2 * * *"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-engineer-secrets
+  labels:
+    app: ai-engineer-agent
+type: Opaque
+stringData:
+  # Database URLs (to be replaced with actual values)
+  database-url: "postgresql://username:password@postgresql:5432/ai_engineer_db"
+  timescale-url: "postgresql://username:password@timescaledb:5432/ai_engineer_analytics"
+  redis-url: "redis://redis:6379"
+  
+  # JWT Secrets
+  jwt-secret: "your-super-secret-jwt-key-change-in-production"
+  jwt-refresh-secret: "your-super-secret-refresh-key-change-in-production"
+  
+  # Google OAuth Credentials
+  google-client-id: "your-google-client-id"
+  google-client-secret: "your-google-client-secret"
+  
+  # Gemini API Configuration
+  gemini-api-key: "your-gemini-api-key"
+  
+  # Email Configuration
+  smtp-host: "smtp.gmail.com"
+  smtp-port: "587"
+  smtp-user: "your-email@gmail.com"
+  smtp-password: "your-app-password"
+  
+  # Monitoring and Analytics
+  sentry-dsn: "https://your-sentry-dsn@sentry.io/project"
+  
+  # GitHub Integration
+  github-token: "your-github-token"
+  github-webhook-secret: "your-webhook-secret"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: database-credentials
+  labels:
+    app: ai-engineer-agent
+    component: database
+type: Opaque
+stringData:
+  postgres-user: "ai_engineer_user"
+  postgres-password: "secure-database-password-change-in-production"
+  postgres-db: "ai_engineer_db"
+  timescale-user: "ai_engineer_analytics_user"
+  timescale-password: "secure-analytics-password-change-in-production"
+  timescale-db: "ai_engineer_analytics"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  labels:
+    app: ai-engineer-agent
+    component: database
+data:
+  postgres.conf: |
+    # PostgreSQL Configuration for AI Engineer Agent
+    
+    # Connection Settings
+    max_connections = 100
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    maintenance_work_mem = 64MB
+    checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    
+    # Logging
+    log_statement = 'mod'
+    log_duration = on
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    
+    # Performance
+    work_mem = 4MB
+    hash_mem_multiplier = 2.0
+    
+    # Security
+    ssl = on
+    ssl_cert_file = '/etc/ssl/certs/server.crt'
+    ssl_key_file = '/etc/ssl/private/server.key'
+  
+  pg_hba.conf: |
+    # PostgreSQL Client Authentication Configuration
+    local   all             postgres                                peer
+    local   all             all                                     md5
+    host    all             all             127.0.0.1/32            md5
+    host    all             all             ::1/128                 md5
+    host    all             all             0.0.0.0/0               md5
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: timescaledb-config
+  labels:
+    app: ai-engineer-agent
+    component: analytics
+data:
+  postgresql.conf: |
+    # TimescaleDB Configuration for Analytics
+    
+    # Load TimescaleDB extension
+    shared_preload_libraries = 'timescaledb'
+    
+    # Connection Settings
+    max_connections = 50
+    shared_buffers = 512MB
+    effective_cache_size = 2GB
+    maintenance_work_mem = 128MB
+    
+    # TimescaleDB specific settings
+    timescaledb.max_background_workers = 8
+    
+    # Logging
+    log_statement = 'mod'
+    log_duration = on
+    
+    # Performance for analytics workloads
+    work_mem = 8MB
+    random_page_cost = 1.0
+    seq_page_cost = 1.0
+    
+    # Compression settings
+    timescaledb.compress_segmentby = 'user_id'
+    timescaledb.compress_orderby = 'timestamp'

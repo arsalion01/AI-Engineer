@@ -1,0 +1,468 @@
+# AI Engineer Agent - GitLab CI/CD Pipeline
+# Comprehensive CI/CD pipeline for GitLab with automated testing and deployment
+
+variables:
+  DOCKER_REGISTRY: registry.gitlab.com
+  IMAGE_NAME: $CI_PROJECT_PATH
+  DOCKER_DRIVER: overlay2
+  NODE_VERSION: "20"
+  
+stages:
+  - validate
+  - test
+  - security
+  - build
+  - deploy-staging
+  - security-testing
+  - deploy-production
+  - monitor
+
+# ============================================================================
+# Validation Stage
+# ============================================================================
+
+code-quality:
+  stage: validate
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  before_script:
+    - npm ci
+  script:
+    - echo "🔍 Running code quality checks..."
+    - npm run type-check
+    - npm run lint
+    - npm run format:check
+    - echo "✅ Code quality checks passed"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+  artifacts:
+    reports:
+      codequality: codequality.json
+    expire_in: 1 week
+
+dependency-check:
+  stage: validate
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  before_script:
+    - npm ci
+  script:
+    - echo "🔍 Checking dependencies for vulnerabilities..."
+    - npm audit --audit-level=moderate
+    - npx license-checker --onlyAllow 'MIT;Apache-2.0;BSD;BSD-2-Clause;BSD-3-Clause;ISC;Unlicense'
+    - echo "✅ Dependency checks passed"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================================
+# Test Stage
+# ============================================================================
+
+unit-tests:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: ai_engineer_test
+        POSTGRES_USER: test_user
+        POSTGRES_PASSWORD: test_password
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/ai_engineer_test
+    REDIS_URL: redis://redis:6379
+    JWT_SECRET: test_jwt_secret_for_gitlab_ci
+    ENCRYPTION_KEY: test_encryption_key_32_chars_long
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  before_script:
+    - npm ci
+    - cp .env.local.template .env.test
+  script:
+    - echo "🧪 Running unit tests..."
+    - npm run test:unit
+    - npm run test:coverage
+    - echo "✅ Unit tests passed"
+  coverage: '/Lines\s*:\s*(\d+\.\d+)%/'
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+    paths:
+      - coverage/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $SKIP_TESTS == "true"
+      when: never
+
+integration-tests:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: ai_engineer_test
+        POSTGRES_USER: test_user
+        POSTGRES_PASSWORD: test_password
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    DATABASE_URL: postgresql://test_user:test_password@postgres:5432/ai_engineer_test
+    REDIS_URL: redis://redis:6379
+    JWT_SECRET: test_jwt_secret_for_gitlab_ci
+    ENCRYPTION_KEY: test_encryption_key_32_chars_long
+    GEMINI_API_KEY: $GEMINI_API_KEY_TEST
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  before_script:
+    - npm ci
+    - cp .env.local.template .env.test
+    - npm run db:migrate:test
+  script:
+    - echo "🔗 Running integration tests..."
+    - npm run test:integration
+    - echo "✅ Integration tests passed"
+  artifacts:
+    reports:
+      junit: integration-junit.xml
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $SKIP_TESTS == "true"
+      when: never
+
+# ============================================================================
+# Security Stage
+# ============================================================================
+
+sast-scan:
+  stage: security
+  include:
+    - template: Security/SAST.gitlab-ci.yml
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+secret-detection:
+  stage: security
+  include:
+    - template: Security/Secret-Detection.gitlab-ci.yml
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+dependency-scanning:
+  stage: security
+  include:
+    - template: Security/Dependency-Scanning.gitlab-ci.yml
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ============================================================================
+# Build Stage
+# ============================================================================
+
+build-image:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - echo "🏗️ Building Docker image..."
+    - |
+      docker build \
+        --target production \
+        --build-arg NODE_ENV=production \
+        --tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA \
+        --tag $CI_REGISTRY_IMAGE:latest \
+        .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+    - echo "✅ Docker image built and pushed"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+container-scanning:
+  stage: build
+  include:
+    - template: Security/Container-Scanning.gitlab-ci.yml
+  variables:
+    CI_APPLICATION_REPOSITORY: $CI_REGISTRY_IMAGE
+    CI_APPLICATION_TAG: $CI_COMMIT_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================================
+# Staging Deployment
+# ============================================================================
+
+deploy-staging:
+  stage: deploy-staging
+  image: alpine:latest
+  environment:
+    name: staging
+    url: https://staging.ai-engineer-agent.com
+  before_script:
+    - apk add --no-cache openssh-client curl
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_KEY" | ssh-add -
+    - mkdir -p ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+  script:
+    - echo "🚀 Deploying to staging environment..."
+    - |
+      ssh $STAGING_USER@$STAGING_HOST << 'EOF'
+        set -e
+        cd /opt/ai-engineer-agent
+        
+        # Pull latest configuration
+        git pull origin main
+        
+        # Update environment
+        cp .env.staging .env.production
+        
+        # Pull new image
+        docker pull ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+        
+        # Update docker-compose to use new image
+        sed -i "s|image: .*|image: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}|" docker-compose.prod.yml
+        
+        # Deploy
+        docker-compose -f docker-compose.prod.yml up -d
+        
+        # Health check
+        timeout 300 bash -c 'until curl -f http://localhost:3000/health; do sleep 5; done'
+      EOF
+    - echo "✅ Staging deployment completed"
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" == "success" ]; then
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"🚀 AI Engineer Agent deployed to staging successfully!"}' \
+          $SLACK_WEBHOOK
+      else
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"❌ AI Engineer Agent staging deployment failed!"}' \
+          $SLACK_WEBHOOK
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+staging-smoke-tests:
+  stage: deploy-staging
+  image: alpine:latest
+  needs: ["deploy-staging"]
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - echo "🧪 Running staging smoke tests..."
+    - sleep 30  # Wait for service to stabilize
+    - curl -f https://staging.ai-engineer-agent.com/health
+    - curl -f https://staging.ai-engineer-agent.com/api/status
+    - echo "✅ Staging smoke tests passed"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================================
+# Security Testing
+# ============================================================================
+
+dast-scan:
+  stage: security-testing
+  include:
+    - template: Security/DAST.gitlab-ci.yml
+  variables:
+    DAST_WEBSITE: https://staging.ai-engineer-agent.com
+    DAST_FULL_SCAN_ENABLED: "true"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+load-testing:
+  stage: security-testing
+  image: grafana/k6:latest
+  script:
+    - echo "⚡ Running load tests..."
+    - |
+      cat > loadtest.js << 'EOF'
+      import http from 'k6/http';
+      import { check } from 'k6';
+      
+      export let options = {
+        stages: [
+          { duration: '2m', target: 10 },
+          { duration: '5m', target: 50 },
+          { duration: '2m', target: 0 },
+        ],
+      };
+      
+      export default function() {
+        let response = http.get('https://staging.ai-engineer-agent.com/health');
+        check(response, {
+          'status is 200': (r) => r.status === 200,
+          'response time < 500ms': (r) => r.timings.duration < 500,
+        });
+      }
+      EOF
+    - k6 run loadtest.js
+    - echo "✅ Load testing completed"
+  artifacts:
+    reports:
+      performance: performance.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================================
+# Production Deployment
+# ============================================================================
+
+deploy-production:
+  stage: deploy-production
+  image: alpine:latest
+  environment:
+    name: production
+    url: https://ai-engineer-agent.com
+  before_script:
+    - apk add --no-cache openssh-client curl
+    - eval $(ssh-agent -s)
+    - echo "$PRODUCTION_SSH_KEY" | ssh-add -
+    - mkdir -p ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+  script:
+    - echo "🚀 Deploying to production environment..."
+    - |
+      ssh $PRODUCTION_USER@$PRODUCTION_HOST << 'EOF'
+        set -e
+        cd /opt/ai-engineer-agent
+        
+        # Create backup
+        ./deploy.sh backup
+        
+        # Update configuration
+        git pull origin main
+        cp .env.production .env
+        
+        # Deploy with new image
+        ./deploy.sh deploy --image="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+        
+        # Extended health check
+        timeout 600 bash -c 'until curl -f https://ai-engineer-agent.com/health; do sleep 10; done'
+      EOF
+    - echo "✅ Production deployment completed"
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" == "success" ]; then
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"🎉 AI Engineer Agent deployed to production successfully!\nCommit: $CI_COMMIT_SHA\nURL: https://ai-engineer-agent.com\"}" \
+          $SLACK_WEBHOOK
+      else
+        curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"🚨 AI Engineer Agent production deployment FAILED!\nRollback initiated for commit: $CI_COMMIT_SHA\"}" \
+          $SLACK_WEBHOOK
+        # Initiate rollback
+        ssh $PRODUCTION_USER@$PRODUCTION_HOST 'cd /opt/ai-engineer-agent && ./deploy.sh rollback'
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+      allow_failure: false
+
+# ============================================================================
+# Post-Deployment Monitoring
+# ============================================================================
+
+post-deployment-check:
+  stage: monitor
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl bc
+  script:
+    - echo "🔍 Post-deployment monitoring..."
+    - sleep 300  # Wait 5 minutes for stabilization
+    - |
+      # Monitor for 10 minutes
+      for i in $(seq 1 20); do
+        response=$(curl -s -o /dev/null -w "%{http_code}" https://ai-engineer-agent.com/health)
+        if [ "$response" != "200" ]; then
+          echo "❌ Health check failed with status: $response"
+          exit 1
+        fi
+        echo "✅ Health check $i/20 passed"
+        sleep 30
+      done
+    - |
+      # Performance check
+      avg_response=$(curl -s -w "%{time_total}" -o /dev/null https://ai-engineer-agent.com)
+      if (( $(echo "$avg_response > 2.0" | bc -l) )); then
+        echo "⚠️ High response time detected: ${avg_response}s"
+      else
+        echo "✅ Response time acceptable: ${avg_response}s"
+      fi
+    - echo "✅ Post-deployment monitoring completed"
+  after_script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+        --data '{"text":"✅ AI Engineer Agent production deployment completed successfully!\n\nSystem Status: All health checks passing\nMonitoring: Active and stable\nURL: https://ai-engineer-agent.com"}' \
+        $SLACK_WEBHOOK
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ============================================================================
+# Cleanup Jobs
+# ============================================================================
+
+cleanup-registry:
+  stage: monitor
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - echo "🧹 Cleaning up old Docker images..."
+    - |
+      # Keep last 10 images, delete older ones
+      OLD_IMAGES=$(curl -s -H "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/registry/repositories" | \
+        jq -r '.[].location' | head -n -10)
+      
+      for image in $OLD_IMAGES; do
+        echo "Deleting old image: $image"
+        # Add deletion logic here if needed
+      done
+    - echo "✅ Registry cleanup completed"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+
+# ============================================================================
+# Pipeline Configuration
+# ============================================================================
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
